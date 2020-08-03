@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	maxAlign  = 8  // 以8字节内存对齐
+	maxAlign  = 8 // 以8字节内存对齐
 	hchanSize = unsafe.Sizeof(hchan{}) + uintptr(-int(unsafe.Sizeof(hchan{}))&(maxAlign-1))
 	debugChan = false
 )
@@ -31,17 +31,17 @@ type hchan struct {
 	qcount   uint           // 环形队列中现有元素的个数
 	dataqsiz uint           // 环形队列能够容纳的元素个数
 	buf      unsafe.Pointer // 指向dataqsiz个数的数组中的一个元素
-	elemsize uint16	// 环形队列中每一个元素的大小
-	closed   uint32	// 标记channel是否关闭
-	elemtype *_type // 元素的类型
-	sendx    uint   // 队列下标，指示元素写入时存放到队列中的位置
-	recvx    uint   // 队列下标，指示元素从队列的该位置读出
-	recvq    waitq  // 等待读消息的goroutine队列
-	sendq    waitq  // 等待写消息的goroutine队列
+	elemsize uint16         // 环形队列中每一个元素的大小
+	closed   uint32         // 标记channel是否关闭
+	elemtype *_type         // 元素的类型
+	sendx    uint           // 队列下标，指示元素写入时存放到队列中的位置
+	recvx    uint           // 队列下标，指示元素从队列的该位置读出
+	recvq    waitq          // 等待读消息的goroutine队列
+	sendq    waitq          // 等待写消息的goroutine队列
 
 	// lock保护hchan中的所有字段, 以及阻塞在这个channel中的sugos的一些字段
 	// 当持有lock时，不应该改变其他G的状态，(特别的，不能ready一个G)，因为它会在栈收缩时发生死锁
-	lock mutex  // 互斥锁  不允许并发读写
+	lock mutex // 互斥锁  不允许并发读写
 }
 
 type waitq struct {
@@ -61,6 +61,7 @@ func makechan64(t *chantype, size int64) *hchan {
 
 	return makechan(t, int(size))
 }
+
 /**
  * 创建通道
  * @param t 通道类型指针
@@ -109,10 +110,10 @@ func makechan(t *chantype, size int) *hchan {
 		c.buf = mallocgc(mem, elem, true)
 	}
 
-	c.elemsize = uint16(elem.size)  // 设置元素大小
-	c.elemtype = elem		//设置元素类型
-	c.dataqsiz = uint(size)	//设置channel大小
-	lockInit(&c.lock, lockRankHchan)   // TODO 不懂是什么意思
+	c.elemsize = uint16(elem.size)   // 设置元素大小
+	c.elemtype = elem                //设置元素类型
+	c.dataqsiz = uint(size)          //设置channel大小
+	lockInit(&c.lock, lockRankHchan) // TODO 不懂是什么意思
 
 	if debugChan {
 		print("makechan: chan=", c, "; elemsize=", elem.size, "; dataqsiz=", size, "\n")
@@ -183,22 +184,13 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 		racereadpc(c.raceaddr(), callerpc, funcPC(chansend))
 	}
 
-	// Fast path: check for failed non-blocking operation without acquiring the lock.
+	// Fast path: 在没有获取锁的情况下检查失败的非阻塞操作
 	//
-	// After observing that the channel is not closed, we observe that the channel is
-	// not ready for sending. Each of these observations is a single word-sized read
-	// (first c.closed and second full()).
-	// Because a closed channel cannot transition from 'ready for sending' to
-	// 'not ready for sending', even if the channel is closed between the two observations,
-	// they imply a moment between the two when the channel was both not yet closed
-	// and not ready for sending. We behave as if we observed the channel at that moment,
-	// and report that the send cannot proceed.
-	//
-	// It is okay if the reads are reordered here: if we observe that the channel is not
-	// ready for sending and then observe that it is not closed, that implies that the
-	// channel wasn't closed during the first observation. However, nothing here
-	// guarantees forward progress. We rely on the side effects of lock release in
-	// chanrecv() and closechan() to update this thread's view of c.closed and full().
+	// 在观察到channel尚未关闭，我们观察到channel还没有准备好send，这些观察中每一个都是单个字读取(第一个的c.closed和第二个的full())
+	// 因为一个关闭的channel无法从'ready for sending'转换成'not ready for sending'，即使channel在两个观测值之间处于关闭状态，他们也隐含着一个时刻，
+	// 即channel还没有关闭，但是还没有准备好发送。我们的行为就好像我们观察这个时刻的channel，并报告发送不能进行。
+	// 此处对读取重新排序也是可以的，如果我们观察还没有准备好send并且还没有关闭，以为着channel在第一次观察结果中并没有关闭，然而，并没有任何东西保证取得进展
+	// 我们依靠chanrecv()和closechan()中锁释放的副作用来更新c.closed and full()的线程视图
 	if !block && c.closed == 0 && full(c) {
 		return false
 	}
@@ -208,16 +200,18 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 		t0 = cputicks()
 	}
 
+	// 加锁
 	lock(&c.lock)
 
+	// 加锁后 重新进行检查 如果channel已经关闭 那么 解锁 panic
 	if c.closed != 0 {
 		unlock(&c.lock)
 		panic(plainError("send on closed channel"))
 	}
 
+	// 获取等待接收的队列
 	if sg := c.recvq.dequeue(); sg != nil {
-		// Found a waiting receiver. We pass the value we want to send
-		// directly to the receiver, bypassing the channel buffer (if any).
+		// 找到了等待的接收者。 我们绕过通道缓冲区（如果有）将要发送的值直接发送给接收器。
 		send(c, sg, ep, func() { unlock(&c.lock) }, 3)
 		return true
 	}
